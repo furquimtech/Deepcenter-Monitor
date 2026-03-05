@@ -5,7 +5,7 @@ rules:
     max_minutes: 5
     color: "green"
   - label: Amarelo
-    max_minutes: 15
+    max_minutes: 10
     color: "yellow"
   - label: Vermelho
     max_minutes: null

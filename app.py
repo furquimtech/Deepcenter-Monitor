@@ -19,11 +19,14 @@ from sqlalchemy import create_engine, text
 QUERY = """
 SELECT
     carteira_int,
-    MAX(dtdatainsercao) AS ultima_atualizacao,
-    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MAX(dtdatainsercao))) / 60.0 AS minutos_sem_atualizacao
+    MAX(dtdatainsercao) AS ultima_insercao,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MAX(dtdatainsercao))) / 60.0 AS minutos_ultima_insercao,
+    MAX(hrhorainicio) AS hora_ultimo_dado,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP::time - MAX(hrhorainicio))) / 60.0 AS minutos_ultimo_dado
 FROM esdeepcenter_acionamento_bradesco
+WHERE dtdatareferencia = CURRENT_DATE
 GROUP BY carteira_int
-ORDER BY minutos_sem_atualizacao DESC, carteira_int;
+ORDER BY minutos_ultimo_dado DESC, carteira_int;
 """
 
 
@@ -98,7 +101,7 @@ def load_rules(cfg: dict[str, Any]) -> list[Rule]:
     return rules
 
 
-def build_legend(rules: list[Rule], refresh_seconds: int) -> str:
+def build_legend(rules: list[Rule], refresh_seconds: int, remaining_seconds: int) -> str:
     parts: list[str] = []
     for rule in rules:
         if rule.max_minutes is None:
@@ -106,7 +109,13 @@ def build_legend(rules: list[Rule], refresh_seconds: int) -> str:
         else:
             parts.append(f"[{rule.color}]o {rule.label}[/{rule.color}] (<= {rule.max_minutes:.1f} min)")
     trend_legend = "Tendencia: [red]^[/red] aumento >10% | - normal | [green]v[/green] queda >10%"
-    return " | ".join(parts) + f" | Atualizacao: {refresh_seconds}s | {trend_legend}"
+    return (
+        " | ".join(parts)
+        + f" | Atualizacao: {refresh_seconds}s"
+        + f" | Proxima em: {remaining_seconds}s"
+        + " | Farois: Insercao e Ultimo Dado"
+        + f" | {trend_legend}"
+    )
 
 
 def trend_cell(current: float, previous: float | None, margin_pct: float = 0.10) -> str:
@@ -122,44 +131,75 @@ def trend_cell(current: float, previous: float | None, margin_pct: float = 0.10)
     return "[green]v[/green]"
 
 
+def format_time_only(value: Any) -> str:
+    if value is None:
+        return "-"
+    if hasattr(value, "strftime"):
+        return value.strftime("%H:%M:%S")
+    text = str(value)
+    if " " in text:
+        return text.split(" ")[-1].split(".")[0]
+    return text.split(".")[0]
+
+
+def status_cell(minutes: float, rules: list[Rule]) -> tuple[str, Rule]:
+    rule = pick_rule(minutes, rules)
+    return f"[{rule.color}]o {rule.label}[/{rule.color}]", rule
+
+
 def build_table(
     rows: list[dict[str, Any]],
     rules: list[Rule],
     checked_at: datetime,
-    previous_minutes_by_wallet: dict[str, float],
+    prev_insert_by_wallet: dict[str, float],
+    prev_data_by_wallet: dict[str, float],
 ) -> Group:
     table = Table(title="Monitor de Carteiras", expand=True)
     table.add_column("Carteira", no_wrap=True)
-    table.add_column("Status", no_wrap=True)
-    table.add_column("Tendencia", justify="center", no_wrap=True)
-    table.add_column("Min sem atualizacao", justify="right", no_wrap=True)
-    table.add_column("Ultima atualizacao", no_wrap=True)
+    table.add_column("Farol Insercao", no_wrap=True)
+    table.add_column("Tend. Ins", justify="center", no_wrap=True)
+    table.add_column("Min Ins", justify="right", no_wrap=True)
+    table.add_column("Ultima Insercao", no_wrap=True)
+    table.add_column("Farol Ult. Dado", no_wrap=True)
+    table.add_column("Tend. Dado", justify="center", no_wrap=True)
+    table.add_column("Min Dado", justify="right", no_wrap=True)
+    table.add_column("Hora Ult. Dado", no_wrap=True)
 
-    count_by_status: dict[str, int] = {}
+    critical_insert = 0
+    critical_data = 0
     for row in rows:
-        minutos = float(row.get("minutos_sem_atualizacao") or 0)
-        rule = pick_rule(minutos, rules)
-        is_critical = rule is rules[-1]
         carteira = str(row.get("carteira_int", "-"))
-        ultima = str(row.get("ultima_atualizacao", "-"))
-        trend = trend_cell(minutos, previous_minutes_by_wallet.get(carteira))
-        previous_minutes_by_wallet[carteira] = minutos
+        ultima = format_time_only(row.get("ultima_insercao"))
+        hora_ultimo_dado = format_time_only(row.get("hora_ultimo_dado"))
 
-        if is_critical:
-            status_cell = f"[blink {rule.color}]o {rule.label}[/]"
-        else:
-            status_cell = f"[{rule.color}]o {rule.label}[/{rule.color}]"
+        min_insert = float(row.get("minutos_ultima_insercao") or 0)
+        min_data = float(row.get("minutos_ultimo_dado") or 0)
+
+        farol_insert, rule_insert = status_cell(min_insert, rules)
+        farol_data, rule_data = status_cell(min_data, rules)
+        trend_insert = trend_cell(min_insert, prev_insert_by_wallet.get(carteira))
+        trend_data = trend_cell(min_data, prev_data_by_wallet.get(carteira))
+
+        prev_insert_by_wallet[carteira] = min_insert
+        prev_data_by_wallet[carteira] = min_data
+        if rule_insert is rules[-1]:
+            critical_insert += 1
+        if rule_data is rules[-1]:
+            critical_data += 1
 
         table.add_row(
             carteira,
-            status_cell,
-            trend,
-            f"{minutos:.1f}",
+            farol_insert,
+            trend_insert,
+            f"{min_insert:.1f}",
             ultima,
+            farol_data,
+            trend_data,
+            f"{min_data:.1f}",
+            hora_ultimo_dado,
         )
-        count_by_status[rule.label] = count_by_status.get(rule.label, 0) + 1
 
-    summary = ", ".join([f"{k}: {v}" for k, v in count_by_status.items()]) or "Sem dados"
+    summary = f"Critico Insercao: {critical_insert} | Critico Ultimo Dado: {critical_data}"
     header = Panel(f"Ultima verificacao: {checked_at:%Y-%m-%d %H:%M:%S} | {summary}", expand=True)
     return Group(header, table)
 
@@ -172,36 +212,32 @@ def main() -> None:
     dsn = build_dsn()
     engine = build_engine(dsn)
     console = Console()
-    legend = Panel(build_legend(rules, refresh_seconds), title="Semaforo", expand=True)
-    previous_minutes_by_wallet: dict[str, float] = {}
+    prev_insert_by_wallet: dict[str, float] = {}
+    prev_data_by_wallet: dict[str, float] = {}
 
-    with Live(Group(legend, Panel("Iniciando monitor...")), console=console, screen=True, auto_refresh=False) as live:
+    initial_legend = Panel(build_legend(rules, refresh_seconds, refresh_seconds), title="Semaforo", expand=True)
+    with Live(Group(initial_legend, Panel("Iniciando monitor...")), console=console, screen=True, auto_refresh=False) as live:
         while True:
             checked_at = datetime.now()
             try:
                 rows = fetch_data(engine)
                 if rows:
-                    live.update(
-                        Group(legend, build_table(rows, rules, checked_at, previous_minutes_by_wallet)),
-                        refresh=True,
-                    )
+                    content = build_table(rows, rules, checked_at, prev_insert_by_wallet, prev_data_by_wallet)
                 else:
-                    live.update(
-                        Group(
-                            legend,
-                            Panel(f"Ultima verificacao: {checked_at:%Y-%m-%d %H:%M:%S}\nNenhum registro retornado."),
-                        ),
-                        refresh=True,
+                    content = Panel(
+                        f"Ultima verificacao: {checked_at:%Y-%m-%d %H:%M:%S}\nNenhum registro retornado."
                     )
             except Exception as exc:
-                live.update(
-                    Group(
-                        legend,
-                        Panel(f"Falha ao consultar o banco: {exc}", title="Erro"),
-                    ),
-                    refresh=True,
+                content = Panel(f"Falha ao consultar o banco: {exc}", title="Erro")
+
+            for remaining in range(refresh_seconds, 0, -1):
+                legend = Panel(
+                    build_legend(rules, refresh_seconds, remaining),
+                    title="Semaforo",
+                    expand=True,
                 )
-            time.sleep(refresh_seconds)
+                live.update(Group(legend, content), refresh=True)
+                time.sleep(1)
 
 
 if __name__ == "__main__":

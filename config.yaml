@@ -1,11 +1,11 @@
-refresh_seconds: 180
+refresh_seconds: 60
 
 rules:
   - label: Verde
-    max_minutes: 5
+    max_minutes: 15
     color: "green"
   - label: Amarelo
-    max_minutes: 10
+    max_minutes: 20
     color: "yellow"
   - label: Vermelho
     max_minutes: null

@@ -1,0 +1,12 @@
+refresh_seconds: 180
+
+rules:
+  - label: Verde
+    max_minutes: 5
+    color: "green"
+  - label: Amarelo
+    max_minutes: 15
+    color: "yellow"
+  - label: Vermelho
+    max_minutes: null
+    color: "red"
